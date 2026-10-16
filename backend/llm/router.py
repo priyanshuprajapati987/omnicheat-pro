@@ -3,6 +3,10 @@
 import os
 from typing import Optional, AsyncGenerator
 from dataclasses import dataclass
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 @dataclass
 class LLMResponse:
@@ -80,16 +84,22 @@ class LLMRouter:
         """Extract provider from model name"""
         model_lower = model.lower()
         
-        if model_lower.startswith(("gpt-", "o1", "o3")):
+        # OpenAI models
+        if model_lower.startswith(("gpt-", "o1", "o3", "chatgpt")):
             return "openai"
+        # Anthropic models
         elif model_lower.startswith(("claude", "anthropic")):
             return "anthropic"
+        # Google models
         elif model_lower.startswith(("gemini", "palm")):
             return "google"
-        elif ":" in model_lower or model_lower in ["llama", "mistral", "qwen"]:
+        # Ollama models (local) - check common local model names
+        elif any(x in model_lower for x in ["llama", "mistral", "qwen", "codellama", "phi", "gemma", "deepseek", "spark"]):
+            return "ollama"
+        # Default to ollama for unknown models (local fallback)
+        elif "ollama" in self.providers:
             return "ollama"
         
-        # Default to openai if not matched
         return "openai"
     
     def list_models(self) -> dict:

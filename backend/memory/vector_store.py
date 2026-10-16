@@ -1,9 +1,9 @@
-"""Conversation Memory with Qdrant Vector DB"""
+"""Conversation Memory with Qdrant Vector DB (with in-memory fallback)"""
 
 import os
 import uuid
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Optional, Dict
 from dataclasses import dataclass, field
 from qdrant_client import QdrantClient
 from qdrant_client.models import VectorParams, Distance, PointStruct, Filter, FieldCondition, MatchValue
@@ -21,25 +21,30 @@ class MemoryEntry:
 
 
 class ConversationMemory:
-    """Vector-based conversation memory using Qdrant"""
+    """Vector-based conversation memory using Qdrant (with in-memory fallback)"""
     
     def __init__(self):
         self.url = os.getenv("QDRANT_URL", "http://localhost:6333")
         self.collection_name = "conversations"
         self.client: Optional[QdrantClient] = None
+        self._connected = False
+        
+        # In-memory fallback storage
+        self._memory_store: Dict[str, List[MemoryEntry]] = {}
+        self._max_entries_per_session = 100
+        
         self._ensure_collection()
     
     def _ensure_collection(self):
         """Create collection if it doesn't exist"""
         try:
-            self.client = QdrantClient(url=self.url)
+            self.client = QdrantClient(url=self.url, timeout=2)
             
-            # Check if collection exists
+            # Test connection
             collections = self.client.get_collections().collections
             collection_names = [c.name for c in collections]
             
             if self.collection_name not in collection_names:
-                # Create collection with 384-dim vectors (sentence-transformers size)
                 self.client.create_collection(
                     collection_name=self.collection_name,
                     vectors_config=VectorParams(
@@ -47,11 +52,15 @@ class ConversationMemory:
                         distance=Distance.COSINE,
                     ),
                 )
-                print(f"✅ Created Qdrant collection: {self.collection_name}")
+                print(f"[OK] Created Qdrant collection: {self.collection_name}")
+            
+            self._connected = True
+            print(f"[OK] Qdrant connected: {self.url}")
         except Exception as e:
-            print(f"⚠️ Qdrant not available: {e}")
-            print("   Memory features will be limited")
+            print(f"[WARN] Qdrant not available: {type(e).__name__}")
+            print("   Using in-memory fallback for conversation history")
             self.client = None
+            self._connected = False
     
     async def add(
         self,
@@ -71,7 +80,17 @@ class ConversationMemory:
             metadata=metadata or {},
         )
         
-        if self.client:
+        # Always store in in-memory fallback
+        if session_id not in self._memory_store:
+            self._memory_store[session_id] = []
+        self._memory_store[session_id].append(entry)
+        
+        # Trim if too many entries
+        if len(self._memory_store[session_id]) > self._max_entries_per_session:
+            self._memory_store[session_id] = self._memory_store[session_id][-self._max_entries_per_session:]
+        
+        # Also try Qdrant if connected
+        if self._connected and self.client:
             try:
                 self.client.upsert(
                     collection_name=self.collection_name,
@@ -90,7 +109,7 @@ class ConversationMemory:
                     ],
                 )
             except Exception as e:
-                print(f"⚠️ Failed to save to Qdrant: {e}")
+                print(f"[WARN] Failed to save to Qdrant: {e}")
         
         return entry
     
@@ -101,8 +120,10 @@ class ConversationMemory:
         limit: int = 5,
     ) -> List[MemoryEntry]:
         """Recall relevant messages from memory"""
-        if not self.client:
-            return []
+        # Use in-memory fallback if Qdrant not connected
+        if not self._connected or not self.client:
+            entries = self._memory_store.get(session_id, [])
+            return entries[-limit:] if entries else []
         
         try:
             results = self.client.search(
@@ -132,8 +153,10 @@ class ConversationMemory:
                 for point in results
             ]
         except Exception as e:
-            print(f"⚠️ Failed to search Qdrant: {e}")
-            return []
+            print(f"[WARN] Failed to search Qdrant: {e}")
+            # Fallback to in-memory
+            entries = self._memory_store.get(session_id, [])
+            return entries[-limit:] if entries else []
     
     async def get_history(
         self,
@@ -141,8 +164,10 @@ class ConversationMemory:
         limit: int = 20,
     ) -> List[MemoryEntry]:
         """Get recent history for a session"""
-        if not self.client:
-            return []
+        # Use in-memory fallback if Qdrant not connected
+        if not self._connected or not self.client:
+            entries = self._memory_store.get(session_id, [])
+            return entries[-limit:] if entries else []
         
         try:
             results = self.client.scroll(
@@ -173,32 +198,35 @@ class ConversationMemory:
                 for point in points
             ]
             
-            # Sort by created_at
             entries.sort(key=lambda x: x.created_at, reverse=True)
             return entries[:limit]
         except Exception as e:
-            print(f"⚠️ Failed to get history: {e}")
-            return []
+            print(f"[WARN] Failed to get history: {e}")
+            entries = self._memory_store.get(session_id, [])
+            return entries[-limit:] if entries else []
     
     async def clear_session(self, session_id: str):
         """Clear all memory for a session"""
-        if not self.client:
-            return
+        # Clear in-memory
+        if session_id in self._memory_store:
+            del self._memory_store[session_id]
         
-        try:
-            self.client.delete(
-                collection_name=self.collection_name,
-                points_selector=Filter(
-                    must=[
-                        FieldCondition(
-                            key="session_id",
-                            match=MatchValue(value=session_id),
-                        )
-                    ]
-                ),
-            )
-        except Exception as e:
-            print(f"⚠️ Failed to clear session: {e}")
+        # Clear Qdrant if connected
+        if self._connected and self.client:
+            try:
+                self.client.delete(
+                    collection_name=self.collection_name,
+                    points_selector=Filter(
+                        must=[
+                            FieldCondition(
+                                key="session_id",
+                                match=MatchValue(value=session_id),
+                            )
+                        ]
+                    ),
+                )
+            except Exception as e:
+                print(f"[WARN] Failed to clear session: {e}")
 
 
 # Simple embedding function (using a lightweight approach)
@@ -211,7 +239,6 @@ class SimpleEmbedder:
     async def embed(self, text: str) -> List[float]:
         """Generate a simple hash-based embedding"""
         import hashlib
-        import struct
         
         # Create deterministic embedding from text
         hash_bytes = hashlib.sha256(text.encode()).digest()
@@ -219,7 +246,6 @@ class SimpleEmbedder:
         # Expand to 384 dimensions
         embedding = []
         for i in range(0, 384, 4):
-            # Get 4 bytes and convert to float
             byte_val = hash_bytes[i % len(hash_bytes)]
             embedding.append((byte_val / 255.0) - 0.5)
         
