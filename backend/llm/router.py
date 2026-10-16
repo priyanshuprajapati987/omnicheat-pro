@@ -1,0 +1,120 @@
+"""Multi-Provider LLM Router"""
+
+import os
+from typing import Optional, AsyncGenerator
+from dataclasses import dataclass
+
+@dataclass
+class LLMResponse:
+    content: str
+    model: str
+    provider: str
+    tokens_used: int = 0
+    finish_reason: str = "stop"
+
+
+class LLMRouter:
+    """Route requests to multiple LLM providers"""
+    
+    def __init__(self):
+        self.providers = {}
+        self._init_providers()
+    
+    def _init_providers(self):
+        """Initialize available providers based on API keys"""
+        if os.getenv("OPENAI_API_KEY"):
+            from llm.providers.openai_provider import OpenAIProvider
+            self.providers["openai"] = OpenAIProvider()
+        
+        if os.getenv("ANTHROPIC_API_KEY"):
+            from llm.providers.anthropic_provider import AnthropicProvider
+            self.providers["anthropic"] = AnthropicProvider()
+        
+        if os.getenv("OLLAMA_URL"):
+            from llm.providers.ollama_provider import OllamaProvider
+            self.providers["ollama"] = OllamaProvider()
+        
+        if os.getenv("GOOGLE_API_KEY"):
+            from llm.providers.google_provider import GoogleProvider
+            self.providers["google"] = GoogleProvider()
+    
+    async def generate(
+        self,
+        model: str,
+        messages: list[dict],
+        temperature: float = 0.7,
+        max_tokens: int = 4096,
+        stream: bool = False,
+    ) -> LLMResponse:
+        """Generate response from specified model"""
+        provider_name = self._get_provider(model)
+        
+        if provider_name not in self.providers:
+            raise ValueError(f"Provider not available: {provider_name}")
+        
+        provider = self.providers[provider_name]
+        return await provider.generate(
+            model=model,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+    
+    async def stream(
+        self,
+        model: str,
+        messages: list[dict],
+        temperature: float = 0.7,
+    ) -> AsyncGenerator[str, None]:
+        """Stream response token by token"""
+        provider_name = self._get_provider(model)
+        
+        if provider_name not in self.providers:
+            raise ValueError(f"Provider not available: {provider_name}")
+        
+        provider = self.providers[provider_name]
+        async for token in provider.stream(model=model, messages=messages, temperature=temperature):
+            yield token
+    
+    def _get_provider(self, model: str) -> str:
+        """Extract provider from model name"""
+        model_lower = model.lower()
+        
+        if model_lower.startswith(("gpt-", "o1", "o3")):
+            return "openai"
+        elif model_lower.startswith(("claude", "anthropic")):
+            return "anthropic"
+        elif model_lower.startswith(("gemini", "palm")):
+            return "google"
+        elif ":" in model_lower or model_lower in ["llama", "mistral", "qwen"]:
+            return "ollama"
+        
+        # Default to openai if not matched
+        return "openai"
+    
+    def list_models(self) -> dict:
+        """List all available models"""
+        models = {
+            "openai": ["gpt-4", "gpt-4-turbo", "gpt-3.5-turbo"],
+            "anthropic": ["claude-3-opus", "claude-3-sonnet", "claude-3-haiku"],
+            "google": ["gemini-pro", "gemini-pro-vision"],
+            "ollama": ["llama2", "mistral", "codellama"],
+        }
+        
+        # Filter to only available providers
+        available = {}
+        for provider, model_list in models.items():
+            if provider in self.providers:
+                available[provider] = model_list
+        
+        return available
+
+
+# Singleton
+_router: Optional[LLMRouter] = None
+
+def get_router() -> LLMRouter:
+    global _router
+    if _router is None:
+        _router = LLMRouter()
+    return _router
