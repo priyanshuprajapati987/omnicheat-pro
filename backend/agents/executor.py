@@ -13,6 +13,7 @@ class AgentResult:
     output: str
     tool_calls: List[str] = field(default_factory=list)
     error: Optional[str] = None
+    tokens_used: int = 0
 
 
 class AgentExecutor:
@@ -62,6 +63,7 @@ class AgentExecutor:
                 success=True,
                 output=response.content,
                 tool_calls=tool_calls,
+                tokens_used=response.tokens_used,
             )
         
         # Save to memory
@@ -99,11 +101,11 @@ class AgentExecutor:
         return prompts.get(agent_type, prompts["general"])
     
     async def _get_history(self, session_id: str) -> List[dict]:
-        """Get conversation history from memory"""
+        """Get conversation history from memory (chronological, oldest first)"""
         entries = await self.memory.get_history(session_id, limit=10)
         return [
             {"role": e.role, "content": e.content}
-            for e in reversed(entries)  # Oldest first
+            for e in entries
         ]
     
     def _needs_tools(self, message: str, agent_type: str) -> bool:
@@ -181,6 +183,7 @@ class AgentExecutor:
             success=True,
             output=response.content,
             tool_calls=tool_calls,
+            tokens_used=response.tokens_used,
         )
     
     def _extract_search_query(self, message: str) -> Optional[str]:

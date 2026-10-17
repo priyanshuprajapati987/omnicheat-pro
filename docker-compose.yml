@@ -9,6 +9,12 @@ services:
       - OLLAMA_URL=${OLLAMA_URL:-http://host.docker.internal:11434}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
+      - QDRANT_URL=${QDRANT_URL:-}
+      - OMNICHAT_API_KEY=${OMNICHAT_API_KEY:-}
+      - RATE_LIMIT_CAPACITY=${RATE_LIMIT_CAPACITY:-30}
+      - RATE_LIMIT_REFILL=${RATE_LIMIT_REFILL:-0.5}
+      - TRUSTED_PROXIES=${TRUSTED_PROXIES:-172.16.0.0/12,127.0.0.1,::1}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped

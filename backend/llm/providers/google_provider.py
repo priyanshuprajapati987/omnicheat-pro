@@ -39,9 +39,9 @@ class GoogleProvider:
             system_instruction=system_prompt if system_prompt else None,
         )
         
-        # Generate response
+        # Generate response with full conversation history
         response = await gemini_model.generate_content_async(
-            chat_history[-1]["parts"][0] if chat_history else "",
+            chat_history if chat_history else "",
             generation_config={
                 "temperature": temperature,
                 "max_output_tokens": max_tokens,

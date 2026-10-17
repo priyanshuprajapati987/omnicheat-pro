@@ -1,5 +1,6 @@
 """Conversation Memory with Qdrant Vector DB (with in-memory fallback)"""
 
+import asyncio
 import os
 import uuid
 from datetime import datetime
@@ -92,7 +93,8 @@ class ConversationMemory:
         # Also try Qdrant if connected
         if self._connected and self.client:
             try:
-                self.client.upsert(
+                await asyncio.to_thread(
+                    self.client.upsert,
                     collection_name=self.collection_name,
                     points=[
                         PointStruct(
@@ -126,7 +128,8 @@ class ConversationMemory:
             return entries[-limit:] if entries else []
         
         try:
-            results = self.client.search(
+            results = await asyncio.to_thread(
+                self.client.search,
                 collection_name=self.collection_name,
                 query_vector=query_embedding,
                 query_filter=Filter(
@@ -139,7 +142,11 @@ class ConversationMemory:
                 ),
                 limit=limit,
             )
-            
+
+            if not results:
+                entries = self._memory_store.get(session_id, [])
+                return entries[-limit:] if entries else []
+
             return [
                 MemoryEntry(
                     id=str(point.id),
@@ -163,14 +170,15 @@ class ConversationMemory:
         session_id: str,
         limit: int = 20,
     ) -> List[MemoryEntry]:
-        """Get recent history for a session"""
+        """Get recent history for a session (always chronological, oldest -> newest)"""
         # Use in-memory fallback if Qdrant not connected
         if not self._connected or not self.client:
             entries = self._memory_store.get(session_id, [])
             return entries[-limit:] if entries else []
         
         try:
-            results = self.client.scroll(
+            results = await asyncio.to_thread(
+                self.client.scroll,
                 collection_name=self.collection_name,
                 scroll_filter=Filter(
                     must=[
@@ -198,8 +206,12 @@ class ConversationMemory:
                 for point in points
             ]
             
-            entries.sort(key=lambda x: x.created_at, reverse=True)
-            return entries[:limit]
+            if not entries:
+                mem_entries = self._memory_store.get(session_id, [])
+                return mem_entries[-limit:] if mem_entries else []
+            
+            entries.sort(key=lambda x: x.created_at)
+            return entries[-limit:]
         except Exception as e:
             print(f"[WARN] Failed to get history: {e}")
             entries = self._memory_store.get(session_id, [])
@@ -214,7 +226,8 @@ class ConversationMemory:
         # Clear Qdrant if connected
         if self._connected and self.client:
             try:
-                self.client.delete(
+                await asyncio.to_thread(
+                    self.client.delete,
                     collection_name=self.collection_name,
                     points_selector=Filter(
                         must=[
@@ -243,9 +256,9 @@ class SimpleEmbedder:
         # Create deterministic embedding from text
         hash_bytes = hashlib.sha256(text.encode()).digest()
         
-        # Expand to 384 dimensions
+        # Expand to exactly 384 dimensions
         embedding = []
-        for i in range(0, 384, 4):
+        for i in range(self.dimension):
             byte_val = hash_bytes[i % len(hash_bytes)]
             embedding.append((byte_val / 255.0) - 0.5)
         

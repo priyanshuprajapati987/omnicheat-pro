@@ -8,6 +8,8 @@ function App() {
   const [input, setInput] = useState('')
   const [models, setModels] = useState<Record<string, string[]>>({})
   const [selectedModel, setSelectedModel] = useState('gpt-3.5-turbo')
+  const [modelsLoaded, setModelsLoaded] = useState(false)
+  const [modelsFailed, setModelsFailed] = useState(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const abortRef = useRef<AbortController | null>(null)
   
@@ -24,6 +26,7 @@ function App() {
     setSessionId,
     addMessage,
     updateLastMessage,
+    removeLastMessage,
     setLoading,
     setError,
     loadSession,
@@ -34,15 +37,25 @@ function App() {
   // Fetch available models
   useEffect(() => {
     fetch('/api/chat/models')
-      .then(res => res.json())
-      .then(data => {
-        setModels(data)
-        const firstProvider = Object.keys(data)[0]
-        if (firstProvider && data[firstProvider].length > 0) {
-          setSelectedModel(data[firstProvider][0])
-        }
+      .then(res => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`)
+        return res.json()
       })
-      .catch(err => console.error('Failed to fetch models:', err))
+      .then(data => {
+        const map: Record<string, string[]> = data && typeof data === 'object' ? data : {}
+        setModels(map)
+        const firstProvider = Object.keys(map)[0]
+        if (firstProvider && map[firstProvider].length > 0) {
+          setSelectedModel(map[firstProvider][0])
+        }
+        if (Object.keys(map).length === 0) setModelsFailed(true)
+      })
+      .catch(err => {
+        console.error('Failed to fetch models:', err)
+        setModels({})
+        setModelsFailed(true)
+      })
+      .finally(() => setModelsLoaded(true))
   }, [])
 
   // Auto-scroll to bottom
@@ -50,8 +63,10 @@ function App() {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
 
+  const providersReady = modelsLoaded && !modelsFailed && Object.keys(models).length > 0
+
   const handleSend = async () => {
-    if (!input.trim() || isLoading) return
+    if (!input.trim() || isLoading || !providersReady) return
     
     const userMessage = input
     addMessage({ role: 'user', content: userMessage })
@@ -92,26 +107,27 @@ function App() {
         buffer = lines.pop() || ''
         
         for (const line of lines) {
-          if (line.startsWith('data: ')) {
-            try {
-              const data = JSON.parse(line.slice(6))
-              
-              if (data.type === 'start') {
-                if (data.session_id && !sessionId) {
-                  setSessionId(data.session_id)
-                }
-              } else if (data.type === 'token') {
-                const msgs = useChatStore.getState().messages
-                const last = msgs[msgs.length - 1]
-                if (last && last.role === 'assistant') {
-                  updateLastMessage(last.content + data.content)
-                }
-              } else if (data.type === 'error') {
-                throw new Error(data.content)
-              }
-            } catch (parseErr) {
-              // Skip unparseable lines
+          if (!line.startsWith('data: ')) continue
+          let data: any
+          try {
+            data = JSON.parse(line.slice(6))
+          } catch {
+            // Skip unparseable lines
+            continue
+          }
+
+          if (data.type === 'start') {
+            if (data.session_id && !sessionId) {
+              setSessionId(data.session_id)
             }
+          } else if (data.type === 'token') {
+            const msgs = useChatStore.getState().messages
+            const last = msgs[msgs.length - 1]
+            if (last && last.role === 'assistant') {
+              updateLastMessage(last.content + data.content)
+            }
+          } else if (data.type === 'error') {
+            throw new Error(data.content || 'Provider error')
           }
         }
       }
@@ -120,6 +136,7 @@ function App() {
         // User cancelled — keep partial content
       } else {
         console.error('Error:', err)
+        removeLastMessage()
         setError(err instanceof Error ? err.message : 'Failed to get response')
       }
     } finally {
@@ -279,6 +296,13 @@ function App() {
           </div>
         )}
 
+        {/* Provider setup banner */}
+        {modelsLoaded && !providersReady && (
+          <div className="bg-amber-600 text-white px-4 py-2 text-sm">
+            No LLM providers configured — set OLLAMA_URL or an API key in .env
+          </div>
+        )}
+
         {/* Messages */}
         <div className="flex-1 overflow-y-auto p-4">
           <div className="max-w-4xl mx-auto space-y-4">
@@ -410,7 +434,7 @@ function App() {
               ) : (
                 <button
                   onClick={handleSend}
-                  disabled={!input.trim()}
+                  disabled={!input.trim() || !providersReady}
                   className="bg-cyan-600 hover:bg-cyan-700 disabled:bg-gray-600 disabled:cursor-not-allowed px-6 py-3 rounded-xl font-semibold transition"
                 >
                   Send

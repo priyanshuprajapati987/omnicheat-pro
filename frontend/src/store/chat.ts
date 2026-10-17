@@ -24,6 +24,7 @@ interface ChatState {
   sessions: SessionMeta[]
   addMessage: (message: Message) => void
   updateLastMessage: (content: string) => void
+  removeLastMessage: () => void
   setLoading: (loading: boolean) => void
   setError: (error: string | null) => void
   setSessionId: (id: string) => void
@@ -76,6 +77,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
       return { messages }
     }),
 
+  removeLastMessage: () =>
+    set((state) => {
+      const messages = [...state.messages]
+      const last = messages[messages.length - 1]
+      if (last && last.role === 'assistant') {
+        messages.pop()
+      }
+      return { messages }
+    }),
+
   setLoading: (loading) => set({ isLoading: loading }),
   setError: (error) => set({ error }),
   setSessionId: (id) => set({ sessionId: id }),
@@ -118,18 +129,51 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   loadSession: (id) => {
-    const { sessions } = get()
+    const { sessions, agentType } = get()
     const session = sessions.find(s => s.id === id)
-    if (!session) return
-    set({
-      messages: session.messages,
-      sessionId: session.id,
-      agentType: session.agentType,
-      error: null,
-    })
+
+    const applyLocal = () => {
+      if (!session) {
+        set({ sessionId: id, error: null })
+        return
+      }
+      set({
+        messages: session.messages,
+        sessionId: session.id,
+        agentType: session.agentType,
+        error: null,
+      })
+    }
+
+    fetch(`/api/chat/history/${encodeURIComponent(id)}`)
+      .then((res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`)
+        return res.json()
+      })
+      .then((data) => {
+        const raw: Array<{ role?: string; content?: string }> = Array.isArray(data?.messages)
+          ? data.messages
+          : []
+        const history = raw
+          .filter((m) => m.role === 'user' || m.role === 'assistant')
+          .map((m) => ({ role: m.role as Message['role'], content: String(m.content ?? '') }))
+          .reverse() // backend returns newest-first; display chronologically
+        if (history.length > 0) {
+          set({
+            messages: history,
+            sessionId: id,
+            agentType: session?.agentType ?? agentType,
+            error: null,
+          })
+        } else {
+          applyLocal()
+        }
+      })
+      .catch(() => applyLocal())
   },
 
   deleteSession: (id) => {
+    fetch(`/api/chat/history/${encodeURIComponent(id)}`, { method: 'DELETE' }).catch(() => {})
     const { sessions, sessionId } = get()
     const next = sessions.filter(s => s.id !== id)
     persistSessions(next)

@@ -51,12 +51,7 @@ class LLMRouter:
         stream: bool = False,
     ) -> LLMResponse:
         """Generate response from specified model"""
-        provider_name = self._get_provider(model)
-        
-        if provider_name not in self.providers:
-            raise ValueError(f"Provider not available: {provider_name}")
-        
-        provider = self.providers[provider_name]
+        provider = self._resolve_provider(model)
         return await provider.generate(
             model=model,
             messages=messages,
@@ -71,14 +66,21 @@ class LLMRouter:
         temperature: float = 0.7,
     ) -> AsyncGenerator[str, None]:
         """Stream response token by token"""
-        provider_name = self._get_provider(model)
-        
-        if provider_name not in self.providers:
-            raise ValueError(f"Provider not available: {provider_name}")
-        
-        provider = self.providers[provider_name]
+        provider = self._resolve_provider(model)
         async for token in provider.stream(model=model, messages=messages, temperature=temperature):
             yield token
+    
+    def _resolve_provider(self, model: str):
+        """Pick the provider for a model, falling back to the first configured one"""
+        provider_name = self._get_provider(model)
+        
+        if provider_name in self.providers:
+            return self.providers[provider_name]
+        
+        if self.providers:
+            return next(iter(self.providers.values()))
+        
+        raise ValueError(f"Provider not available: {provider_name}")
     
     def _get_provider(self, model: str) -> str:
         """Extract provider from model name"""

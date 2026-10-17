@@ -34,7 +34,7 @@ backend/
 ├── main.py           # FastAPI app entry
 ├── routes/           # API routes
 │   ├── health.py     # Health check
-│   ├── chat.py       # Chat endpoints + WebSocket
+│   ├── chat.py       # Chat endpoints + SSE streaming
 │   └── agents.py     # Agent management
 ├── llm/              # LLM providers
 │   └── router.py     # Multi-provider router

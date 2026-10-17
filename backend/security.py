@@ -5,11 +5,14 @@ import re
 import os
 import time
 import threading
+import ipaddress
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 PUBLIC_PATHS = {"/", "/health", "/docs", "/openapi.json", "/redoc"}
+
+DEFAULT_TRUSTED_PROXIES = "127.0.0.1,::1"
 
 
 # ---------------------------------------------------------------------------
@@ -71,19 +74,21 @@ def sanitize_body(body: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 class TokenBucket:
-    __slots__ = ("capacity", "tokens", "refill_rate", "updated")
+    __slots__ = ("capacity", "tokens", "refill_rate", "updated", "last_seen")
 
     def __init__(self, capacity: int, refill_rate: float):
         self.capacity = capacity
         self.tokens = capacity
         self.refill_rate = refill_rate  # tokens per second
         self.updated = time.monotonic()
+        self.last_seen = self.updated
 
     def consume(self, n: int = 1) -> bool:
         now = time.monotonic()
         elapsed = now - self.updated
         self.tokens = min(self.capacity, self.tokens + elapsed * self.refill_rate)
         self.updated = now
+        self.last_seen = now
         if self.tokens >= n:
             self.tokens -= n
             return True
@@ -91,7 +96,10 @@ class TokenBucket:
 
 
 class RateLimiter:
-    """Per-client token-bucket rate limiter (thread-safe)."""
+    """Per-client token-bucket rate limiter (thread-safe, with bucket pruning)."""
+
+    IDLE_TTL = 600.0  # drop buckets idle longer than 10 minutes
+    MAX_BUCKETS = 5000
 
     def __init__(self, capacity: int = 30, refill_rate: float = 0.5):
         self._buckets: dict[str, TokenBucket] = {}
@@ -99,8 +107,22 @@ class RateLimiter:
         self._capacity = capacity
         self._refill_rate = refill_rate
 
+    def _prune(self, now: float) -> None:
+        idle = [
+            key for key, bucket in self._buckets.items()
+            if now - bucket.last_seen > self.IDLE_TTL
+        ]
+        for key in idle:
+            del self._buckets[key]
+        excess = len(self._buckets) - self.MAX_BUCKETS
+        if excess > 0:
+            oldest = sorted(self._buckets.items(), key=lambda kv: kv[1].last_seen)
+            for key, _ in oldest[:excess]:
+                del self._buckets[key]
+
     def check(self, client_id: str) -> bool:
         with self._lock:
+            self._prune(time.monotonic())
             bucket = self._buckets.get(client_id)
             if bucket is None:
                 bucket = TokenBucket(self._capacity, self._refill_rate)
@@ -130,6 +152,53 @@ _limiter = _make_limiter()
 
 def get_limiter() -> RateLimiter:
     return _limiter
+
+
+# ---------------------------------------------------------------------------
+# Client IP resolution (proxy-aware)
+# ---------------------------------------------------------------------------
+
+_trusted_nets_cache: dict[str, list] = {}
+
+
+def _trusted_proxy_networks() -> list:
+    raw = os.getenv("TRUSTED_PROXIES", DEFAULT_TRUSTED_PROXIES)
+    nets = _trusted_nets_cache.get(raw)
+    if nets is None:
+        nets = []
+        for part in raw.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            try:
+                nets.append(ipaddress.ip_network(part, strict=False))
+            except ValueError:
+                continue
+        _trusted_nets_cache[raw] = nets
+    return nets
+
+
+def _is_trusted_proxy(host: str) -> bool:
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return any(ip in net for net in _trusted_proxy_networks())
+
+
+def _client_ip(request: Request) -> str:
+    peer = request.client.host if request.client else "unknown"
+    if not _is_trusted_proxy(peer):
+        return peer
+    forwarded = request.headers.get("x-forwarded-for", "")
+    if forwarded:
+        first_hop = forwarded.split(",")[0].strip()
+        if first_hop:
+            return first_hop
+    real_ip = request.headers.get("x-real-ip", "").strip()
+    if real_ip:
+        return real_ip
+    return peer
 
 
 # ---------------------------------------------------------------------------
@@ -165,8 +234,7 @@ class SecurityMiddleware(BaseHTTPMiddleware):
 
         # --- rate limit ---
         if self._rate_limit and path not in PUBLIC_PATHS:
-            client = request.client.host if request.client else "unknown"
-            if not _limiter.check(client):
+            if not _limiter.check(_client_ip(request)):
                 return JSONResponse(
                     status_code=429,
                     content={"error": "rate_limited", "detail": "Too many requests. Slow down."},

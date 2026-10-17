@@ -17,11 +17,14 @@ class ToolResult:
 class WebSearchTool:
     """Web search using DuckDuckGo"""
     
+    def _search_sync(self, query: str, max_results: int) -> list:
+        with DDGS() as ddgs:
+            return list(ddgs.text(query, max_results=max_results))
+    
     async def search(self, query: str, max_results: int = 5) -> ToolResult:
         """Search the web"""
         try:
-            with DDGS() as ddgs:
-                results = list(ddgs.text(query, max_results=max_results))
+            results = await asyncio.to_thread(self._search_sync, query, max_results)
                 
             if not results:
                 return ToolResult(
