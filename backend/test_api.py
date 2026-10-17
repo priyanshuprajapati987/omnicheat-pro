@@ -14,7 +14,6 @@ with patch.dict("os.environ", {"OLLAMA_URL": ""}, clear=False):
     from main import app
     from llm.router import LLMRouter, LLMResponse
     from agents.executor import AgentExecutor, AgentResult
-    from memory.vector_store import get_memory
 
 
 # ---------------------------------------------------------------------------
@@ -289,9 +288,9 @@ class TestAgents:
 
     def test_get_agent_not_found(self, client):
         r = client.get("/api/agents/nonexistent")
-        assert r.status_code == 200  # returns error dict
+        assert r.status_code == 404  # proper HTTP status after security fix
         data = r.json()
-        assert data["error"] == "Agent not found"
+        assert data["detail"] == "Agent not found"
 
 
 # ---------------------------------------------------------------------------

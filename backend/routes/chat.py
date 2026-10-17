@@ -101,7 +101,7 @@ async def stream_message(request: ChatRequest):
             ):
                 full_response.append(token)
                 yield f"data: {json.dumps({'type': 'token', 'content': token})}\n\n"
-        except Exception as e:
+        except Exception:
             # Fallback: non-streaming generate
             try:
                 response = await router_instance.generate(
@@ -176,7 +176,7 @@ async def clear_history(session_id: str):
 async def chat_websocket(websocket: WebSocket):
     """WebSocket for streaming chat"""
     await websocket.accept()
-    router_instance = get_router()
+    get_router()
     executor = get_executor()
     
     try:

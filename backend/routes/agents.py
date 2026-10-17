@@ -1,8 +1,8 @@
 """Agents routes"""
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import List
 
 router = APIRouter()
 
@@ -67,7 +67,7 @@ async def list_agents():
 async def get_agent(agent_id: str):
     """Get agent by ID"""
     if agent_id not in agents_db:
-        return {"error": "Agent not found"}
+        raise HTTPException(status_code=404, detail="Agent not found")
     
     config = agents_db[agent_id]
     return {
