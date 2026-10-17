@@ -108,7 +108,21 @@ Once running, visit:
 - **Swagger UI:** http://localhost:8000/docs
 - **ReDoc:** http://localhost:8000/redoc
 
----
+## 🧪 Tests
+
+```bash
+cd backend
+python -m pytest test_api.py -v
+```
+
+**24 tests passing** — health, chat (send/models/history), agents, LLM router, agent executor, memory fallback.
+
+## 🐳 Docker
+
+```bash
+docker-compose up -d
+# Backend :8000, Frontend :3000
+```
 
 ## 🤖 Built-in Agents
 
