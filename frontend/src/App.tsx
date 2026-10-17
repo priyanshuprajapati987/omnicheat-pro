@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import ReactMarkdown from 'react-markdown'
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism'
@@ -9,6 +9,7 @@ function App() {
   const [models, setModels] = useState<Record<string, string[]>>({})
   const [selectedModel, setSelectedModel] = useState('gpt-3.5-turbo')
   const messagesEndRef = useRef<HTMLDivElement>(null)
+  const abortRef = useRef<AbortController | null>(null)
   
   const { 
     messages, 
@@ -16,6 +17,7 @@ function App() {
     error, 
     sessionId,
     agentType,
+    sessions,
     clearMessages,
     newSession,
     setAgentType,
@@ -24,6 +26,9 @@ function App() {
     updateLastMessage,
     setLoading,
     setError,
+    loadSession,
+    deleteSession,
+    saveCurrentSession,
   } = useChatStore()
 
   // Fetch available models
@@ -55,6 +60,10 @@ function App() {
     setLoading(true)
     setInput('')
     
+    // Abort controller for stop generation
+    const controller = new AbortController()
+    abortRef.current = controller
+    
     try {
       const response = await fetch('/api/chat/stream', {
         method: 'POST',
@@ -65,6 +74,7 @@ function App() {
           session_id: sessionId,
           agent_type: agentType,
         }),
+        signal: controller.signal,
       })
       
       if (!response.ok) throw new Error('Failed to get response')
@@ -106,12 +116,27 @@ function App() {
         }
       }
     } catch (err) {
-      console.error('Error:', err)
-      setError(err instanceof Error ? err.message : 'Failed to get response')
+      if (err instanceof DOMException && err.name === 'AbortError') {
+        // User cancelled — keep partial content
+      } else {
+        console.error('Error:', err)
+        setError(err instanceof Error ? err.message : 'Failed to get response')
+      }
     } finally {
+      abortRef.current = null
       setLoading(false)
+      // Persist session to history after every exchange
+      setTimeout(() => saveCurrentSession(), 100)
     }
   }
+
+  const handleStop = () => {
+    abortRef.current?.abort()
+  }
+
+  const copyCode = useCallback((text: string) => {
+    navigator.clipboard.writeText(text).catch(() => {})
+  }, [])
 
   const handleKeyPress = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -173,11 +198,45 @@ function App() {
           )}
         </div>
 
-        <div className="flex-1"></div>
+        {/* Session History */}
+        <div className="flex-1 overflow-y-auto">
+          {sessions.length > 0 && (
+            <div className="p-4">
+              <div className="text-xs text-gray-400 mb-2">HISTORY</div>
+              <div className="space-y-1">
+                {sessions.map((session) => (
+                  <div
+                    key={session.id}
+                    className={`group flex items-center justify-between px-3 py-2 rounded-lg cursor-pointer text-sm ${
+                      sessionId === session.id
+                        ? 'bg-gray-700 text-white'
+                        : 'text-gray-400 hover:bg-gray-700 hover:text-white'
+                    }`}
+                    onClick={() => loadSession(session.id)}
+                  >
+                    <div className="truncate flex-1 mr-2">
+                      {session.title}
+                    </div>
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        deleteSession(session.id)
+                      }}
+                      className="opacity-0 group-hover:opacity-100 text-gray-500 hover:text-red-400 text-xs"
+                      title="Delete"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
         
         <div className="p-4 border-t border-gray-700">
           <div className="text-xs text-gray-500">
-            v0.1.0 • Week 2
+            v0.1.0 • {sessions.length} session{sessions.length !== 1 ? 's' : ''}
           </div>
         </div>
       </aside>
@@ -260,17 +319,29 @@ function App() {
                           components={{
                             code({ className, children, ...props }) {
                               const match = /language-(\w+)/.exec(className || '')
-                              return match ? (
-                                <SyntaxHighlighter
-                                  style={oneDark}
-                                  language={match[1]}
-                                  PreTag="div"
-                                  className="rounded-lg my-2"
-                                  {...props}
-                                >
-                                  {String(children).replace(/\n$/, '')}
-                                </SyntaxHighlighter>
-                              ) : (
+                              if (match) {
+                                const codeStr = String(children).replace(/\n$/, '')
+                                return (
+                                  <div className="relative my-2">
+                                    <button
+                                      onClick={() => copyCode(codeStr)}
+                                      className="absolute top-2 right-2 text-xs bg-gray-700 hover:bg-gray-600 text-gray-300 px-2 py-1 rounded z-10"
+                                    >
+                                      📋 Copy
+                                    </button>
+                                    <SyntaxHighlighter
+                                      style={oneDark}
+                                      language={match[1]}
+                                      PreTag="div"
+                                      className="rounded-lg"
+                                      {...props}
+                                    >
+                                      {codeStr}
+                                    </SyntaxHighlighter>
+                                  </div>
+                                )
+                              }
+                              return (
                                 <code className="bg-gray-700 px-2 py-1 rounded" {...props}>
                                   {children}
                                 </code>
@@ -329,17 +400,22 @@ function App() {
                 className="flex-1 bg-gray-700 text-white px-4 py-3 rounded-xl border border-gray-600 focus:outline-none focus:border-cyan-500 resize-none"
                 disabled={isLoading}
               />
-              <button
-                onClick={handleSend}
-                disabled={isLoading || !input.trim()}
-                className="bg-cyan-600 hover:bg-cyan-700 disabled:bg-gray-600 disabled:cursor-not-allowed px-6 py-3 rounded-xl font-semibold transition"
-              >
-                {isLoading ? (
-                  <span className="animate-pulse">...</span>
-                ) : (
-                  'Send'
-                )}
-              </button>
+              {isLoading ? (
+                <button
+                  onClick={handleStop}
+                  className="bg-red-600 hover:bg-red-700 px-6 py-3 rounded-xl font-semibold transition"
+                >
+                  ⏹ Stop
+                </button>
+              ) : (
+                <button
+                  onClick={handleSend}
+                  disabled={!input.trim()}
+                  className="bg-cyan-600 hover:bg-cyan-700 disabled:bg-gray-600 disabled:cursor-not-allowed px-6 py-3 rounded-xl font-semibold transition"
+                >
+                  Send
+                </button>
+              )}
             </div>
             <p className="text-xs text-gray-500 mt-2 text-center">
               Enter to send • Shift+Enter for new line • Tools auto-detected
