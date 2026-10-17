@@ -1,6 +1,7 @@
 """Chat routes - WebSocket + REST with Memory & Tools"""
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import List, Optional
 from llm.router import get_router
@@ -62,6 +63,86 @@ async def list_models():
     """List available models"""
     router_instance = get_router()
     return router_instance.list_models()
+
+
+@router.post("/stream")
+async def stream_message(request: ChatRequest):
+    """Stream response token-by-token via Server-Sent Events"""
+    session_id = request.session_id or str(uuid.uuid4())
+    router_instance = get_router()
+
+    # Build system prompt from agent type
+    system_prompts = {
+        "general": "You are a helpful AI assistant. Be concise and clear.",
+        "coder": "You are an expert programmer. Help users write, debug, and understand code. Use markdown code blocks with language specification.",
+        "researcher": "You are a research expert. Help users research topics, find sources, and summarize information with evidence.",
+        "writer": "You are a professional writer. Help users create high-quality content with clear structure.",
+    }
+    system_prompt = system_prompts.get(request.agent_type, system_prompts["general"])
+
+    # Pull recent history from memory for context
+    memory = get_memory()
+    history_entries = await memory.get_history(session_id, limit=10)
+    messages = [{"role": "system", "content": system_prompt}]
+    for e in reversed(history_entries):
+        messages.append({"role": e.role, "content": e.content})
+    messages.append({"role": "user", "content": request.message})
+
+    async def event_generator():
+        # Send session metadata first
+        yield f"data: {json.dumps({'type': 'start', 'session_id': session_id, 'model': request.model})}\n\n"
+
+        full_response = []
+        try:
+            async for token in router_instance.stream(
+                model=request.model,
+                messages=messages,
+                temperature=request.temperature,
+            ):
+                full_response.append(token)
+                yield f"data: {json.dumps({'type': 'token', 'content': token})}\n\n"
+        except Exception as e:
+            # Fallback: non-streaming generate
+            try:
+                response = await router_instance.generate(
+                    model=request.model,
+                    messages=messages,
+                    temperature=request.temperature,
+                )
+                # Simulate streaming for fallback
+                content = response.content
+                words = content.split(" ")
+                for i, word in enumerate(words):
+                    chunk = word + (" " if i < len(words) - 1 else "")
+                    full_response.append(chunk)
+                    yield f"data: {json.dumps({'type': 'token', 'content': chunk})}\n\n"
+            except Exception as e2:
+                yield f"data: {json.dumps({'type': 'error', 'content': str(e2)})}\n\n"
+                return
+
+        # Save to memory
+        final_text = "".join(full_response)
+        try:
+            from memory.vector_store import get_embedder
+            embedder = get_embedder()
+            user_emb = await embedder.embed(request.message)
+            asst_emb = await embedder.embed(final_text)
+            await memory.add(session_id, "user", request.message, embedding=user_emb)
+            await memory.add(session_id, "assistant", final_text, embedding=asst_emb)
+        except Exception:
+            pass
+
+        yield f"data: {json.dumps({'type': 'end', 'session_id': session_id, 'model': request.model})}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.get("/history/{session_id}")

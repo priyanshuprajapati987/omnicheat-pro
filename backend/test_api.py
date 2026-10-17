@@ -168,6 +168,91 @@ class TestChatHistory:
 
 
 # ---------------------------------------------------------------------------
+# Streaming Endpoint (SSE)
+# ---------------------------------------------------------------------------
+
+class TestChatStream:
+    def test_stream_returns_sse(self, client):
+        async def fake_stream(model, messages, temperature=0.7):
+            yield "Hello "
+            yield "streaming "
+            yield "world!"
+
+        with patch("routes.chat.get_router") as mock_gr, \
+             patch("routes.chat.get_memory") as mock_gm:
+            mock_router = MagicMock()
+            mock_router.stream = fake_stream
+            mock_gr.return_value = mock_router
+            mock_mem = AsyncMock()
+            mock_mem.get_history = AsyncMock(return_value=[])
+            mock_mem.add = AsyncMock()
+            mock_gm.return_value = mock_mem
+
+            r = client.post(
+                "/api/chat/stream",
+                json={"message": "hi", "model": "qwen3:1.7b", "session_id": "s-test"},
+            )
+        assert r.status_code == 200
+        assert "text/event-stream" in r.headers["content-type"]
+        body = r.text
+        assert '"type": "start"' in body or '"type":"start"' in body
+        assert "Hello" in body
+        assert "streaming" in body
+        assert "world!" in body
+        assert '"type": "end"' in body or '"type":"end"' in body
+
+    def test_stream_fallback_to_generate(self, client):
+        """When stream() raises, falls back to generate()"""
+        from llm.router import LLMResponse
+
+        async def broken_stream(model, messages, temperature=0.7):
+            raise RuntimeError("stream unsupported")
+            yield ""  # pragma: no cover
+
+        with patch("routes.chat.get_router") as mock_gr, \
+             patch("routes.chat.get_memory") as mock_gm:
+            mock_router = MagicMock()
+            mock_router.stream = broken_stream
+            mock_router.generate = AsyncMock(return_value=LLMResponse(
+                content="Fallback response here",
+                model="qwen3:1.7b",
+                provider="ollama",
+            ))
+            mock_gr.return_value = mock_router
+            mock_mem = AsyncMock()
+            mock_mem.get_history = AsyncMock(return_value=[])
+            mock_mem.add = AsyncMock()
+            mock_gm.return_value = mock_mem
+
+            r = client.post(
+                "/api/chat/stream",
+                json={"message": "hi", "model": "qwen3:1.7b", "session_id": "s-fb"},
+            )
+        assert r.status_code == 200
+        assert "Fallback" in r.text
+
+    def test_stream_sends_session_id(self, client):
+        async def fake_stream(model, messages, temperature=0.7):
+            yield "ok"
+
+        with patch("routes.chat.get_router") as mock_gr, \
+             patch("routes.chat.get_memory") as mock_gm:
+            mock_router = MagicMock()
+            mock_router.stream = fake_stream
+            mock_gr.return_value = mock_router
+            mock_mem = AsyncMock()
+            mock_mem.get_history = AsyncMock(return_value=[])
+            mock_mem.add = AsyncMock()
+            mock_gm.return_value = mock_mem
+
+            r = client.post(
+                "/api/chat/stream",
+                json={"message": "hi", "model": "qwen3:1.7b", "session_id": "my-sid-42"},
+            )
+        assert "my-sid-42" in r.text
+
+
+# ---------------------------------------------------------------------------
 # Agents Endpoints
 # ---------------------------------------------------------------------------
 

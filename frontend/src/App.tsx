@@ -21,6 +21,7 @@ function App() {
     setAgentType,
     setSessionId,
     addMessage,
+    updateLastMessage,
     setLoading,
     setError,
   } = useChatStore()
@@ -49,11 +50,13 @@ function App() {
     
     const userMessage = input
     addMessage({ role: 'user', content: userMessage })
+    // Add empty assistant message for streaming
+    addMessage({ role: 'assistant', content: '', model: selectedModel })
     setLoading(true)
     setInput('')
     
     try {
-      const response = await fetch('/api/chat/send', {
+      const response = await fetch('/api/chat/stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -66,20 +69,42 @@ function App() {
       
       if (!response.ok) throw new Error('Failed to get response')
       
-      const data = await response.json()
+      const reader = response.body!.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
       
-      // Save session ID
-      if (data.session_id && !sessionId) {
-        setSessionId(data.session_id)
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n')
+        buffer = lines.pop() || ''
+        
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            try {
+              const data = JSON.parse(line.slice(6))
+              
+              if (data.type === 'start') {
+                if (data.session_id && !sessionId) {
+                  setSessionId(data.session_id)
+                }
+              } else if (data.type === 'token') {
+                const msgs = useChatStore.getState().messages
+                const last = msgs[msgs.length - 1]
+                if (last && last.role === 'assistant') {
+                  updateLastMessage(last.content + data.content)
+                }
+              } else if (data.type === 'error') {
+                throw new Error(data.content)
+              }
+            } catch (parseErr) {
+              // Skip unparseable lines
+            }
+          }
+        }
       }
-      
-      // Add assistant response
-      addMessage({
-        role: 'assistant',
-        content: data.content,
-        model: data.model,
-        tool_calls: data.tool_calls,
-      })
     } catch (err) {
       console.error('Error:', err)
       setError(err instanceof Error ? err.message : 'Failed to get response')
