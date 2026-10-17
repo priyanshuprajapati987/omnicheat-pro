@@ -120,8 +120,11 @@ python -m pytest test_api.py -v
 ## 🐳 Docker
 
 ```bash
+# Launch backend (:8000) + frontend (:3000)
 docker-compose up -d
-# Backend :8000, Frontend :3000
+
+# Uses host Ollama by default (host.docker.internal:11434)
+# Override: OLLAMA_URL=http://your-ollama:11434 docker-compose up -d
 ```
 
 ## 🤖 Built-in Agents
